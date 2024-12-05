@@ -266,7 +266,7 @@ def sample_timestep(x, t):
 # %%
 # Initialize TensorBoard SummaryWriter
 writer = SummaryWriter(log_dir="runsPC_SH5Y_pretrained/diffusion_model_experiment")
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
+
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -274,6 +274,8 @@ model = FineTunedUNet(pretrained_encoder=True).to(device)
 optimizer = Adam(model.parameters(), lr=0.001)
 epochs = 100000
 
+
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
 # Directories for saving final images and model checkpoints
 final_images_dir = "saved_images_PC_SH5Y_pretrained/final"
 model_save_dir = "saved_models_PC_SH5Y_pretrained"
