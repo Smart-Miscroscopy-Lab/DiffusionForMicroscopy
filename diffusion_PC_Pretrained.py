@@ -281,7 +281,7 @@ os.makedirs(final_images_dir, exist_ok=True)
 os.makedirs(model_save_dir, exist_ok=True)
 
 ##to start training from checkpoint: # Load checkpoint if exists
-checkpoint_path = "saved_models_PC_SH5Y_pretrained/model_latest.pth"  # Change to your latest checkpoint file
+checkpoint_path = "saved_models_PC_SH5Y_pretrained/model_epoch_3300.pth"  # Change to your latest checkpoint file
 start_epoch = 0
 
 if os.path.exists(checkpoint_path):
@@ -322,7 +322,7 @@ for epoch in range(start_epoch, epochs):
         writer.add_scalar("Loss/train", loss.item(), epoch * len(dataloader) + step)
 
     # Save final generated image and model checkpoint at specified epochs
-    if epoch % 5 == 0:  # Adjust frequency as needed
+    if epoch % 50 == 0:  # Adjust frequency as needed
         # Generate and save the final image
         img = torch.randn((1, 3, IMG_SIZE, IMG_SIZE), device=device)
         for i in range(0, T)[::-1]:
