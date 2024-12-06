@@ -58,7 +58,7 @@ def forward_diffusion_sample(x_0, t, device="cpu"):
 
 
 # Define beta schedule
-T = 300
+T = 150
 betas = linear_beta_schedule(timesteps=T)
 
 # Pre-calculate different terms for closed form
@@ -77,7 +77,7 @@ posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 
 
 IMG_SIZE = 512
-BATCH_SIZE = 28
+BATCH_SIZE = 16
 
 def load_transformed_dataset():
     data_transforms = [
@@ -271,7 +271,7 @@ writer = SummaryWriter(log_dir="runsPC_SH5Y_pretrained/diffusion_model_experimen
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = FineTunedUNet(pretrained_encoder=True).to(device)
-optimizer = Adam(model.parameters(), lr=0.001)
+optimizer = Adam(model.parameters(), lr=0.0001)
 epochs = 100000
 
 
@@ -283,7 +283,7 @@ os.makedirs(final_images_dir, exist_ok=True)
 os.makedirs(model_save_dir, exist_ok=True)
 
 ##to start training from checkpoint: # Load checkpoint if exists
-checkpoint_path = "saved_models_PC_SH5Y_pretrained/model_epoch_3300.pth"  # Change to your latest checkpoint file
+checkpoint_path = "saved_models_PC_SH5Y_pretrained/model_epoch_6800.pth"  # Change to your latest checkpoint file
 start_epoch = 0
 
 if os.path.exists(checkpoint_path):
@@ -319,6 +319,8 @@ for epoch in range(start_epoch, epochs):
         loss = F.l1_loss(noise, noise_pred)
         loss.backward()
         optimizer.step()
+        scheduler.step(loss)
+
 
         # Log loss
         writer.add_scalar("Loss/train", loss.item(), epoch * len(dataloader) + step)
