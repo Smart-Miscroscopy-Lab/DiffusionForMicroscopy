@@ -76,8 +76,8 @@ posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 # %%
 
 
-IMG_SIZE = 512
-BATCH_SIZE = 16
+IMG_SIZE = 64
+BATCH_SIZE = 64
 
 def load_transformed_dataset():
     data_transforms = [
@@ -265,25 +265,25 @@ def sample_timestep(x, t):
 
 # %%
 # Initialize TensorBoard SummaryWriter
-writer = SummaryWriter(log_dir="runsPC_SH5Y_pretrained/diffusion_model_experiment")
+writer = SummaryWriter(log_dir="runsPC_BT474_pretrained/diffusion_model_experiment")
 
 
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model = FineTunedUNet(pretrained_encoder=True).to(device)
-optimizer = Adam(model.parameters(), lr=0.0001)
+optimizer = Adam(model.parameters(), lr=0.001)
 epochs = 100000
 
 
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
 # Directories for saving final images and model checkpoints
-final_images_dir = "saved_images_PC_SH5Y_pretrained/final"
-model_save_dir = "saved_models_PC_SH5Y_pretrained"
+final_images_dir = "saved_images_PC_BT474_pretrained/final"
+model_save_dir = "saved_models_PC_BT474_pretrained"
 os.makedirs(final_images_dir, exist_ok=True)
 os.makedirs(model_save_dir, exist_ok=True)
 
 ##to start training from checkpoint: # Load checkpoint if exists
-checkpoint_path = "saved_models_PC_SH5Y_pretrained/model_epoch_6800.pth"  # Change to your latest checkpoint file
+checkpoint_path = ""  # Change to your latest checkpoint file
 start_epoch = 0
 
 if os.path.exists(checkpoint_path):
@@ -315,9 +315,18 @@ for epoch in range(start_epoch, epochs):
         if noise_pred.shape != noise.shape:
             noise_pred = F.interpolate(noise_pred, size=noise.shape[-2:], mode="bilinear", align_corners=False)
 
+        for param in model.encoder_blocks.parameters():
+            param.requires_grad = False
+
+        # Unfreeze after a set number of epochs
+        if epoch > 5000:  # Unfreeze after epoch 1000
+            for param in model.encoder_blocks.parameters():
+                param.requires_grad = True
+
         # Compute loss
         loss = F.l1_loss(noise, noise_pred)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         scheduler.step(loss)
 
