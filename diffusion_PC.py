@@ -92,8 +92,8 @@ posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 # %%
 
 
-IMG_SIZE = 1024
-BATCH_SIZE = 4
+IMG_SIZE = 256
+BATCH_SIZE = 16 
 
 def load_transformed_dataset():
     data_transforms = [

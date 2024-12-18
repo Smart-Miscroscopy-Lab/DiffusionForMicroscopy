@@ -63,13 +63,13 @@ def load_transformed_dataset():
 data = load_transformed_dataset()
 dataloader = DataLoader(data, batch_size=BATCH_SIZE, shuffle=True, drop_last=True)
 
-# %% Vision Transformer Diffusion Model
 class VisionTransformerDiffusionModel(nn.Module):
     def __init__(self, pretrained_model_name="google/vit-base-patch16-224-in21k"):
         super().__init__()
         # Load pretrained ViT
         self.vit = ViTModel.from_pretrained(pretrained_model_name)
         self.hidden_size = self.vit.config.hidden_size
+        self.patch_size = self.vit.config.patch_size
         
         # Add time embedding layer
         self.time_mlp = nn.Sequential(
@@ -79,29 +79,43 @@ class VisionTransformerDiffusionModel(nn.Module):
         )
         
         # Output projection for noise prediction
-        self.output_layer = nn.Linear(self.hidden_size, 3 * IMG_SIZE * IMG_SIZE)
+        self.output_layer = nn.Linear(self.hidden_size, 3)
 
     def forward(self, x, t):
-        # Ensure input shape is (B, 3, H, W)
+        # Input validation
         if len(x.shape) != 4 or x.shape[1] != 3:
             raise ValueError(f"Expected input shape (B, 3, H, W), but got {x.shape}")
         
-        # Pass input image directly through ViT
-        x = self.vit(pixel_values=x).last_hidden_state
+        batch_size = x.shape[0]
+        img_size = x.shape[-1]
 
-        # Add time embedding
-        t_emb = self.time_mlp(t.unsqueeze(-1).float())
-        x = x + t_emb.unsqueeze(1)
+        # Pass input image through ViT
+        vit_output = self.vit(pixel_values=x).last_hidden_state  # Shape: (B, num_patches, hidden_size)
         
-        # Predict noise
-        x = self.output_layer(x)
-        return x.view(-1, 3, IMG_SIZE, IMG_SIZE)
+        # Add time embedding
+        t_emb = self.time_mlp(t.unsqueeze(-1).float())  # Shape: (B, hidden_size)
+        t_emb = t_emb.unsqueeze(1).expand(-1, vit_output.size(1), -1)  # Shape: (B, num_patches, hidden_size)
+        x = vit_output + t_emb  # Shape: (B, num_patches, hidden_size)
+        
+        # Predict noise for each patch
+        x = self.output_layer(x)  # Shape: (B, num_patches, 3)
+        
+        # Reshape patches back to image
+        num_patches = int((img_size / self.patch_size) ** 2)
+        patch_dim = self.patch_size
+        x = x.view(batch_size, int(img_size / patch_dim), int(img_size / patch_dim), 3)  # (B, H/patch_size, W/patch_size, 3)
+        x = x.permute(0, 3, 1, 2)  # (B, 3, H/patch_size, W/patch_size)
+        x = F.interpolate(x, size=(img_size, img_size), mode='bilinear', align_corners=False)  # Upsample to original image size
+        return x
+
 
 # %% Loss and sampling functions
 def get_loss(model, x_0, t):
     x_noisy, noise = forward_diffusion_sample(x_0, t, device)
     noise_pred = model(x_noisy, t)
+    print(f"Noise shape: {noise.shape}, Noise prediction shape: {noise_pred.shape}")  # Debugging
     return F.mse_loss(noise, noise_pred)
+
 
 @torch.no_grad()
 def sample_timestep(x, t):

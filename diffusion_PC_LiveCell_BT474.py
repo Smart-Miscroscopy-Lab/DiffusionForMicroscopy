@@ -24,8 +24,16 @@ from torchvision.utils import save_image
 from parallel_nodes import setup_distributed
 from torch.nn.parallel import DistributedDataParallel as DDP
 import math
-import torchvision.models as models
 
+
+# %% [markdown]
+# We first need to build the inputs for our model, which are more and more noisy images. Instead of doing this sequentially, we can use the closed form provided in the papers to calculate the image for any of the timesteps individually.
+# 
+# **Key Takeaways**:
+# - The noise-levels/variances can be pre-computed
+# - There are different types of variance schedules
+# - We can sample each timestep image independently (Sums of Gaussians is also Gaussian)
+# - No model is needed in this forward step
 
 # %%
 
@@ -76,8 +84,8 @@ posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 # %%
 
 
-IMG_SIZE = 128
-BATCH_SIZE = 8
+IMG_SIZE = 256
+BATCH_SIZE = 16
 
 def load_transformed_dataset():
     data_transforms = [
@@ -88,16 +96,23 @@ def load_transformed_dataset():
         transforms.RandomHorizontalFlip(p=0.5),
         #transforms.CenterCrop((IMG_SIZE, IMG_SIZE)), #crop back to original size
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         transforms.Lambda(lambda t: (t * 2) - 1) # Scale between [-1, 1]
     ]
     data_transform = transforms.Compose(data_transforms)
 
-    train = Dataset.ImageFolder(root= '/users/gpb21161/Grant/Datasets/GaussianBlurPC', transform=data_transform)
+    train = Dataset.ImageFolder(root= '/users/gpb21161/Grant/Datasets/LiveCell/BT474', transform=data_transform)
 
     return train
 
 
+def show_tensor_image(image):
+    reverse_transforms = transforms.Compose([
+        transforms.Lambda(lambda t: (t + 1) / 2),
+        transforms.Lambda(lambda t: t.permute(1, 2, 0)), # CHW to HWC
+        transforms.Lambda(lambda t: t * 255.),
+        transforms.Lambda(lambda t: t.numpy().astype(np.uint8)),
+        transforms.ToPILImage(),
+    ])
 
 
 data = load_transformed_dataset()
@@ -109,7 +124,6 @@ image = next(iter(dataloader))[0]
 
 num_images = 10
 stepsize = int(T/num_images)
-
 
 
 
@@ -159,63 +173,60 @@ class SinusoidalPositionEmbeddings(nn.Module):
         return embeddings
 
 
-import torchvision.models as models
-
-
-class FineTunedUNet(nn.Module):
-    def __init__(self, pretrained_encoder=True):
+class Unet(nn.Module):
+    """
+    A simplified variant of the Unet architecture.
+    """
+    def __init__(self):
         super().__init__()
-        image_channels = 3  # Input images are RGB (adjust for your data if needed)
+        image_channels = 3
+        down_channels = (64, 128, 256, 512, 1024)
+        up_channels = (1024, 512, 256, 128, 64)
+        out_dim = 3
         time_emb_dim = 32
-        out_dim = 3  # Output channels
-
-        # Load ImageNet-pretrained ResNet as the encoder
-        resnet = models.resnet34(pretrained=pretrained_encoder)
-        self.encoder_blocks = nn.ModuleList([
-            nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu, resnet.maxpool),  # Block 1
-            resnet.layer1,  # Block 2
-            resnet.layer2,  # Block 3
-            resnet.layer3,  # Block 4
-            resnet.layer4   # Block 5
-        ])
-        
-        # Define the decoder with learnable layers
-        decoder_channels = [512, 256, 128, 64, 64]
-        self.decoder_blocks = nn.ModuleList([
-            Block(decoder_channels[i], decoder_channels[i + 1], time_emb_dim, up=True)
-            for i in range(len(decoder_channels) - 1)
-        ])
 
         # Time embedding
         self.time_mlp = nn.Sequential(
-            SinusoidalPositionEmbeddings(time_emb_dim),
-            nn.Linear(time_emb_dim, time_emb_dim),
-            nn.ReLU()
-        )
+                SinusoidalPositionEmbeddings(time_emb_dim),
+                nn.Linear(time_emb_dim, time_emb_dim),
+                nn.ReLU()
+            )
 
-        # Initial projection and output layer
-        self.input_layer = nn.Conv2d(image_channels, 64, 3, padding=1)
-        self.output_layer = nn.Conv2d(64, out_dim, kernel_size=1)
-	
+        # Initial projection
+        self.conv0 = nn.Conv2d(image_channels, down_channels[0], 3, padding=1)
 
-    def forward(self, x, t):
-        t_emb = self.time_mlp(t)
+        # Downsample
+        self.downs = nn.ModuleList([Block(down_channels[i], down_channels[i+1], \
+                                    time_emb_dim) \
+                    for i in range(len(down_channels)-1)])
+        # Upsample
+        self.ups = nn.ModuleList([Block(up_channels[i], up_channels[i+1], \
+                                        time_emb_dim, up=True) \
+                    for i in range(len(up_channels)-1)])
 
-        # Encoder: downsample the image
-        skip_connections = []
-        for block in self.encoder_blocks:
-            x = block(x)
-            skip_connections.append(x)
+        # Edit: Corrected a bug found by Jakub C (see YouTube comment)
+        self.output = nn.Conv2d(up_channels[-1], out_dim, 1)
 
-        # Decoder: upsample and concatenate skip connections
-        for block in self.decoder_blocks:
-            skip = skip_connections.pop()
-            x = torch.cat((x, skip), dim=1)
-            x = block(x, t_emb)
+    def forward(self, x, timestep):
+        # Embedd time
+        t = self.time_mlp(timestep)
+        # Initial conv
+        x = self.conv0(x)
+        # Unet
+        residual_inputs = []
+        for down in self.downs:
+            x = down(x, t)
+            residual_inputs.append(x)
+        for up in self.ups:
+            residual_x = residual_inputs.pop()
+            # Add residual x as additional channels
+            x = torch.cat((x, residual_x), dim=1)
+            x = up(x, t)
+        return self.output(x)
 
-        return self.output_layer(x)
-
-
+model = Unet()
+print("Num params: ", sum(p.numel() for p in model.parameters()))
+model
 
 
 
@@ -242,14 +253,8 @@ def sample_timestep(x, t):
     sqrt_recip_alphas_t = get_index_from_list(sqrt_recip_alphas, t, x.shape)
 
     # Call model (current image - noise prediction)
-    noise_pred = model(x, t)
-    
-    # Ensure `noise_pred` matches the size of `x`
-    if noise_pred.shape != x.shape:
-        noise_pred = F.interpolate(noise_pred, size=x.shape[-2:], mode="bilinear", align_corners=False)
-
     model_mean = sqrt_recip_alphas_t * (
-        x - betas_t * noise_pred / sqrt_one_minus_alphas_cumprod_t
+        x - betas_t * model(x, t) / sqrt_one_minus_alphas_cumprod_t
     )
     posterior_variance_t = get_index_from_list(posterior_variance, t, x.shape)
 
@@ -265,77 +270,39 @@ def sample_timestep(x, t):
 
 # %%
 # Initialize TensorBoard SummaryWriter
-writer = SummaryWriter(log_dir="runsPC_BT474_pretrained/diffusion_model_experiment")
-
-
+writer = SummaryWriter(log_dir="runsPC_BT474/diffusion_model_experiment")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = FineTunedUNet(pretrained_encoder=True).to(device)
+model.to(device)
 optimizer = Adam(model.parameters(), lr=0.001)
 epochs = 100000
 
-
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
 # Directories for saving final images and model checkpoints
-final_images_dir = "saved_images_PC_BT474_pretrained/final"
-model_save_dir = "saved_models_PC_BT474_pretrained"
+final_images_dir = "saved_images_PC_BT474/final"
+model_save_dir = "saved_models_PC_BT474"
 os.makedirs(final_images_dir, exist_ok=True)
 os.makedirs(model_save_dir, exist_ok=True)
 
-##to start training from checkpoint: # Load checkpoint if exists
-checkpoint_path = ""  # Change to your latest checkpoint file
-start_epoch = 0
-
-if os.path.exists(checkpoint_path):
-    print(f"Loading checkpoint from {checkpoint_path}...")
-    checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    start_epoch = checkpoint['epoch'] + 1
-    print(f"Resuming training from epoch {start_epoch}...")
-else:
-    print("No checkpoint found, starting training from scratch.")
-
-
-for epoch in range(start_epoch, epochs):
-    model.train()
+# Training loop with saving the model and final generated images
+for epoch in range(epochs):
     for step, batch in enumerate(dataloader):
         optimizer.zero_grad()
 
         # Select random timesteps
         t = torch.randint(0, T, (BATCH_SIZE,), device=device).long()
 
-        # Compute noisy images and ground truth noise
-        x_noisy, noise = forward_diffusion_sample(batch[0].to(device), t, device=device)
-
-        # Predict noise using the model
+        # Compute loss and backward pass
+        x_noisy, noise = forward_diffusion_sample(batch[0], t, device=device)
         noise_pred = model(x_noisy, t)
-
-        # Resize `noise_pred` to match the shape of `noise` if they differ
-        if noise_pred.shape != noise.shape:
-            noise_pred = F.interpolate(noise_pred, size=noise.shape[-2:], mode="bilinear", align_corners=False)
-
-        for param in model.encoder_blocks.parameters():
-            param.requires_grad = False
-
-        # Unfreeze after a set number of epochs
-        if epoch > 5000:  # Unfreeze after epoch 1000
-            for param in model.encoder_blocks.parameters():
-                param.requires_grad = True
-
-        # Compute loss
         loss = F.l1_loss(noise, noise_pred)
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-        scheduler.step(loss)
-
 
         # Log loss
         writer.add_scalar("Loss/train", loss.item(), epoch * len(dataloader) + step)
 
     # Save final generated image and model checkpoint at specified epochs
-    if epoch % 300 == 0:  # Adjust frequency as needed
+    if epoch % 20 == 0:  # Adjust frequency as needed
         # Generate and save the final image
         img = torch.randn((1, 3, IMG_SIZE, IMG_SIZE), device=device)
         for i in range(0, T)[::-1]:

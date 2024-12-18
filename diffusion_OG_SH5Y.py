@@ -1,4 +1,8 @@
-
+# %% [markdown]
+# # A Diffusion Model from Scratch in Pytorch
+# 
+# In this notebook I want to build a very simple (as few code as possible) Diffusion Model for generating car images. I will explain all the theoretical details in the YouTube video.
+# 
 # 
 # **Sources:**
 # - Github implementation [Denoising Diffusion Pytorch](https://github.com/lucidrains/denoising-diffusion-pytorch)
@@ -11,20 +15,27 @@
 # %%
 import torch
 import torchvision
-import torch.nn as nn
 from torch.optim import Adam
 import torchvision.datasets as Dataset
 from torchvision import transforms
 from torch.utils.data import DataLoader
 import numpy as np
-import os
 from torch.utils.tensorboard import SummaryWriter
-import torch.nn.functional as F
-from torchvision.utils import save_image
-from parallel_nodes import setup_distributed
-from torch.nn.parallel import DistributedDataParallel as DDP
-import math
 
+
+
+# %% [markdown]
+# Later in this notebook we will do some additional modifications to this dataset, for example make the images smaller, convert them to tensors ect.
+
+# %% [markdown]
+# # Building the Diffusion Model
+# 
+
+# %% [markdown]
+# ## Step 1: The forward process = Noise scheduler
+# 
+# 
+# 
 
 # %% [markdown]
 # We first need to build the inputs for our model, which are more and more noisy images. Instead of doing this sequentially, we can use the closed form provided in the papers to calculate the image for any of the timesteps individually.
@@ -36,7 +47,7 @@ import math
 # - No model is needed in this forward step
 
 # %%
-
+import torch.nn.functional as F
 
 def linear_beta_schedule(timesteps, start=0.0001, end=0.02):
     return torch.linspace(start, end, timesteps)
@@ -84,23 +95,19 @@ posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod)
 # %%
 
 
-IMG_SIZE = 512
-BATCH_SIZE = 8
+IMG_SIZE = 256
+BATCH_SIZE = 32
 
 def load_transformed_dataset():
     data_transforms = [
-        transforms.Resize((IMG_SIZE,IMG_SIZE)), #crop
-        transforms.RandomVerticalFlip(p=0.5),
-        #transforms.Pad(padding = int(0.2*IMG_SIZE), padding_mode = 'reflect'), #reflect boundary to get rid of borders
-        #transforms.RandomRotation((-40,40)),
-        transforms.RandomHorizontalFlip(p=0.5),
-        #transforms.CenterCrop((IMG_SIZE, IMG_SIZE)), #crop back to original size
-        transforms.ToTensor(),
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(), # Scales data into [0,1]
         transforms.Lambda(lambda t: (t * 2) - 1) # Scale between [-1, 1]
     ]
     data_transform = transforms.Compose(data_transforms)
 
-    train = Dataset.ImageFolder(root= '/users/gpb21161/Grant/Datasets/LiveCell/BT474', transform=data_transform)
+    train = Dataset.ImageFolder(root= '/users/gpb21161/Grant/Datasets/LiveCell/SH5Y', transform=data_transform)
 
     return train
 
@@ -145,7 +152,8 @@ stepsize = int(T/num_images)
 # 
 
 # %%
-
+from torch import nn
+import math
 
 
 class Block(nn.Module):
@@ -194,7 +202,7 @@ class SinusoidalPositionEmbeddings(nn.Module):
         return embeddings
 
 
-class SimpleUnet(nn.Module):
+class Unet(nn.Module):
     """
     A simplified variant of the Unet architecture.
     """
@@ -245,7 +253,7 @@ class SimpleUnet(nn.Module):
             x = up(x, t)
         return self.output(x)
 
-model = SimpleUnet()
+model = Unet()
 print("Num params: ", sum(p.numel() for p in model.parameters()))
 model
 
@@ -293,20 +301,25 @@ def sample_timestep(x, t):
 
 # %%
 # Initialize TensorBoard SummaryWriter
-writer = SummaryWriter(log_dir="runsPC_SH5Y/diffusion_model_experiment")
+writer = SummaryWriter(log_dir="runs_SH5Y/diffusion_model_experiment")
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 model.to(device)
 optimizer = Adam(model.parameters(), lr=0.001)
 epochs = 100000
 
-# Directories for saving final images and model checkpoints
-final_images_dir = "saved_images_PC_SH5Y/final"
-model_save_dir = "saved_models_PC_SH5Y"
-os.makedirs(final_images_dir, exist_ok=True)
+
+import os
+
+# Define directories to save images and models
+noisy_images_dir = "saved_images_SH5Y/noisy"
+generated_images_dir = "saved_images_SH5Y/generated"
+model_save_dir = "saved_models_SH5Y"
+os.makedirs(noisy_images_dir, exist_ok=True)
+os.makedirs(generated_images_dir, exist_ok=True)
 os.makedirs(model_save_dir, exist_ok=True)
 
-# Training loop with saving the model and final generated images
+# Training loop with image and model saving
 for epoch in range(epochs):
     for step, batch in enumerate(dataloader):
         optimizer.zero_grad()
@@ -315,7 +328,7 @@ for epoch in range(epochs):
         t = torch.randint(0, T, (BATCH_SIZE,), device=device).long()
 
         # Compute loss and backward pass
-        x_noisy, noise = forward_diffusion_sample(batch[0], t, device=device)
+        x_noisy, noise = forward_diffusion_sample(batch[0].to(device), t, device=device)
         noise_pred = model(x_noisy, t)
         loss = F.l1_loss(noise, noise_pred)
         loss.backward()
@@ -324,19 +337,32 @@ for epoch in range(epochs):
         # Log loss
         writer.add_scalar("Loss/train", loss.item(), epoch * len(dataloader) + step)
 
-    # Save final generated image and model checkpoint at specified epochs
-    if epoch % 5 == 0:  # Adjust frequency as needed
-        # Generate and save the final image
-        img = torch.randn((1, 3, IMG_SIZE, IMG_SIZE), device=device)
-        for i in range(0, T)[::-1]:
-            t_sample = torch.full((1,), i, device=device, dtype=torch.long)
-            img = sample_timestep(img, t_sample)
-            img = torch.clamp(img, -1.0, 1.0)
+        # Log and save noisy images
+        if step == 0:
+            grid_noisy = torchvision.utils.make_grid(x_noisy[:4], normalize=True, range=(-1, 1))
+            writer.add_image("Noisy Images/Forward Pass", grid_noisy, epoch)
+            torchvision.utils.save_image(
+                grid_noisy, f"{noisy_images_dir}/epoch_{epoch:03d}_noisy.png", normalize=True, range=(-1, 1)
+            )
 
-        # Save final image in .tiff format
-        save_image(img, f"{final_images_dir}/epoch_{epoch:03d}_final.tiff", normalize=True, range=(-1, 1))
-        print(f"Epoch {epoch}: Final image saved.")
+        # Log and save generated images
+        if epoch % 10 == 0 and step == 0:
+            sampled_images = []
+            img = torch.randn((1, 3, IMG_SIZE, IMG_SIZE), device=device)
+            for i in range(0, T)[::-1]:
+                t_sample = torch.full((1,), i, device=device, dtype=torch.long)
+                img = sample_timestep(img, t_sample)
+                img = torch.clamp(img, -1.0, 1.0)
+                if i % (T // 10) == 0:  # Save at intervals
+                    sampled_images.append(img.clone().detach().cpu())
 
+            grid_generated = torchvision.utils.make_grid(torch.cat(sampled_images, dim=0), normalize=True, range=(-1, 1))
+            writer.add_image("Generated Images/Backward Pass", grid_generated, epoch)
+
+        print(f"Epoch {epoch} | Step {step:03d} Loss: {loss.item()} ")
+
+    # Save the model and generated images every 50 epochs
+    if epoch % 50 == 0:
         # Save the model checkpoint
         model_save_path = f"{model_save_dir}/model_epoch_{epoch:03d}.pth"
         torch.save({
@@ -347,7 +373,19 @@ for epoch in range(epochs):
         }, model_save_path)
         print(f"Epoch {epoch}: Model checkpoint saved at {model_save_path}")
 
-# Close the TensorBoard writer
+        # Save final generated image
+        with torch.no_grad():
+            img = torch.randn((1, 3, IMG_SIZE, IMG_SIZE), device=device)
+            for i in range(0, T)[::-1]:
+                t_sample = torch.full((1,), i, device=device, dtype=torch.long)
+                img = sample_timestep(img, t_sample)
+                img = torch.clamp(img, -1.0, 1.0)
+
+            torchvision.utils.save_image(
+                img, f"{generated_images_dir}/epoch_{epoch:03d}_final.png", normalize=True, range=(-1, 1)
+            )
+            print(f"Epoch {epoch}: Final generated image saved.")
+
 writer.close()
 
 
