@@ -8,7 +8,7 @@ model = Unet(
 
 diffusion = GaussianDiffusion(
     model,
-    image_size = 512,
+    image_size = 128,
     timesteps = 1000,           # number of steps
     sampling_timesteps = 250    # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
 )
@@ -24,7 +24,7 @@ print(f"First few files: {files[:10]}")
 trainer = Trainer(
     diffusion,
     '/users/gpb21161/Grant/Datasets/LiveCell/SH5Y',
-    train_batch_size = 32,
+    train_batch_size = 8,
     train_lr = 8e-5,
     train_num_steps = 700000,         # total training steps
     gradient_accumulate_every = 2,    # gradient accumulation steps
